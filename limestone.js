@@ -120,7 +120,7 @@ exports.SphinxClient = function() {
             //sys.puts('Connected, sending protocol version... State is ' + server_conn.readyState);
             // Sending protocol version
             // sys.puts('Sending version number...');
-            // Here we must send 4 bytes, '0x00000001'
+            // Here we must send 4 bytes, '0x00 00 00 01'
             if (server_conn.readyState == 'open') {
 				var version_number = Buffer.makeWriter();
 				version_number.push.int32(1);
@@ -263,7 +263,7 @@ exports.SphinxClient = function() {
             request.push.int32(parseInt(weight));
         }
 
-        request.push.lstring(query_parameters.indexes); // Indexes used
+        request.push.lstring(query.indexes); // Indexes used
 
         request.push.int32(1); // id64 range marker
 
@@ -298,67 +298,67 @@ exports.SphinxClient = function() {
             }
         }
         
-        request.push.int32(query_parameters.groupfunc);
-        request.push.lstring(query_parameters.groupby); // Groupby length
+        request.push.int32(query.groupfunc);
+        request.push.lstring(query.groupby); // Groupby length
 
-        request.push.int32(query_parameters.maxmatches); // Maxmatches, default to 1000
+        request.push.int32(query.maxmatches); // Maxmatches, default to 1000
 
-        request.push.lstring(query_parameters.groupsort); // Groupsort
+        request.push.lstring(query.groupsort); // Groupsort
 
-        request.push.int32(query_parameters.cutoff); // Cutoff
-        request.push.int32(query_parameters.retrycount); // Retrycount
-        request.push.int32(query_parameters.retrydelay); // Retrydelay
+        request.push.int32(query.cutoff); // Cutoff
+        request.push.int32(query.retrycount); // Retrycount
+        request.push.int32(query.retrydelay); // Retrydelay
 
-        request.push.lstring(query_parameters.groupdistinct); // Group distinct
+        request.push.lstring(query.groupdistinct); // Group distinct
 
-        if (query_parameters.anchor.length == 0) {
+        if (query.anchor.length == 0) {
             request.push.int32(0); // no anchor given
         } else {
             request.push.int32(1); // anchor point in radians
-            request.push.lstring(query_parameters.anchor["attrlat"]); // Group distinct
-            request.push.lstring(query_parameters.anchor["attrlong"]); // Group distinct
-    		request.push.float(query_parameters.anchor["lat"]);
-    		request.push.float(query_parameters.anchor["long"]);
+            request.push.lstring(query.anchor["attrlat"]); // Group distinct
+            request.push.lstring(query.anchor["attrlong"]); // Group distinct
+    		request.push.float(query.anchor["lat"]);
+    		request.push.float(query.anchor["long"]);
         }
 
-        request.push.int32(query_parameters.indexweights.length);
-        for (var i in query_parameters.indexweights) {
+        request.push.int32(query.indexweights.length);
+        for (var i in query.indexweights) {
             request.push.int32(i);
-            request.push.int32(query_parameters.indexweights[i]);
+            request.push.int32(query.indexweights[i]);
         }
 
-        request.push.int32(query_parameters.maxquerytime); 
+        request.push.int32(query.maxquerytime); 
 
-        request.push.int32(query_parameters.weights.length);
-        for (var i in query_parameters.weights) {
+        request.push.int32(query.weights.length);
+        for (var i in query.weights) {
             request.push.int32(i);
-            request.push.int32(query_parameters.weights[i]);
+            request.push.int32(query.weights[i]);
         }
 
-        request.push.lstring(query_parameters.comment); 
+        request.push.lstring(query.comment); 
 
-        request.push.int32(query_parameters.overrides.length);
-        for (var i in query_parameters.overrides) {
-            request.push.lstring(query_parameters.overrides[i].attr); 
-            request.push.int32(query_parameters.overrides[i].type);
-            request.push.int32(query_parameters.overrides[i].values.length);
-            for (var id in query_parameters.overrides[i].values) {
+        request.push.int32(query.overrides.length);
+        for (var i in query.overrides) {
+            request.push.lstring(query.overrides[i].attr); 
+            request.push.int32(query.overrides[i].type);
+            request.push.int32(query.overrides[i].values.length);
+            for (var id in query.overrides[i].values) {
                 request.push.int64(id);
-                switch (query_parameters.overrides[i].type) {
+                switch (query.overrides[i].type) {
 	                case Sphinx.attribute.FLOAT:
-	                    request.push.float(query_parameters.overrides[i].values[id]);
+	                    request.push.float(query.overrides[i].values[id]);
 	                    break;
 	                case Sphinx.attribute.BIGINT:
-	                    request.push.int64(query_parameters.overrides[i].values[id]);
+	                    request.push.int64(query.overrides[i].values[id]);
 	                    break;
 	                default:
-	                    request.push.int32(query_parameters.overrides[i].values[id]);
+	                    request.push.int32(query.overrides[i].values[id]);
 	                    break;
                 }
             }
         }
 
-        request.push.lstring(query_parameters.selectlist); // Select-list
+        request.push.lstring(query.selectlist); // Select-list
 
         var request_buf = request.toBuffer();
         var req_length = Buffer.makeWriter();
