@@ -1,14 +1,19 @@
 var tcp = require('net');
 var sys = require('sys');
+var events = require('events');
+var Step = require("step");
 
-exports.SphinxClient = function() {
-    var self = { };
+var limestone = exports;
 
     var buffer_extras = require('./buffer_extras');
 
-    var Sphinx = {
-        port : 9312
+    var _defaults = {
+    	host				: 'localhost',
+    	port				: 9312,
+    	connection_mode		: 'PERSIST'
     };
+
+    var Sphinx = {};
 
     // All search modes
     Sphinx.searchMode = {
@@ -99,350 +104,391 @@ exports.SphinxClient = function() {
         "MULTI":          0x40000000 
     };
 
-    var server_conn;
-    var connection_status;
-    var response_output;
 
-    // Connect to Sphinx server
-    self.connect = function(port, callback) {
-
-        server_conn = tcp.createConnection(port || Sphinx.port);
-        // disable Nagle algorithm
-        server_conn.setNoDelay(true);
-        //server_conn.setEncoding('binary');
-
-        response_output = null;
-
-        //var promise = new process.Promise();
-
-        server_conn.addListener('connect', function () {
-
-            //sys.puts('Connected, sending protocol version... State is ' + server_conn.readyState);
-            // Sending protocol version
-            // sys.puts('Sending version number...');
-            // Here we must send 4 bytes, '0x00 00 00 01'
-            if (server_conn.readyState == 'open') {
-				var version_number = Buffer.makeWriter();
-				version_number.push.int32(1);
-                server_conn.write(version_number.toBuffer());
-
-                // Waiting for answer
-                server_conn.on('data', function(data) {
-                    /*if (response_output) {
-                        sys.puts('connect: Data received from server');
-                    }*/
-
-                    // var data_unpacked = binary.unpack('N*', data);
-                    var receive_listeners = server_conn.listeners('data');
-                    var i, z;
-                    for (i = 0; i < receive_listeners.length; i++) {
-                        server_conn.removeListener('data', receive_listeners[i]);
-                    }
-					var protocol_version_raw = data.toReader();
-                    var protocol_version = protocol_version_raw.int32();
-                    var data_unpacked = {'': protocol_version};
-
-                    //  console.log('Protocol version: ' + protocol_version);
-
-                    if (data_unpacked[""] >= 1) {
-
-                        // Remove listener after handshaking
-                        var listeners = server_conn.listeners('data');
-                        for (z = 0; z < listeners.length; z++) {
-                            server_conn.removeListener('data', listeners[z]);
-                        }
-
-                        // Simple connection status indicator
-                        connection_status = 1;
-
-                        server_conn.on('data', readResponseData);
-
-                        // Use callback
-                        // promise.emitSuccess();
-                        callback(null);
-
-                    } else {
-                        callback(new Error('Wrong protocol version: ' + protocol_version));
-                    }
-
-                });
-                server_conn.on('error', function(exp) {
-                    console.log('Error: ' + exp);
-                });
-            } else {
-                callback(new Error('Connection is ' + server_conn.readyState + ' in OnConnect'));
-            }
-        });
-
-    };
-
-    // sys.puts('Connecting to searchd...');
-
-    self.query = function(query_raw, callback) {
-        var query = new Object();
-
-        initResponseOutput(callback);
-
-        var query_parameters = {
-			offset				: 0,
-			limit				: 20,
-			mode				: Sphinx.searchMode.ALL,
-			weights				: [],
-			sort				: Sphinx.sortMode.RELEVANCE,
-			sortby				: "",
-			min_id				: 0,
-			max_id				: 0,
-			filters				: [],
-			groupby				: "",
-			groupfunc			: Sphinx.groupFunc.DAY,
-			groupsort			: "@group desc",
-			groupdistinct		: "",
-			maxmatches			: 1000,
-			cutoff				: 0,
-			retrycount			: 0,
-			retrydelay			: 0,
-			anchor				: [],
-			indexweights		: [],
-			ranker				: Sphinx.rankingMode.PROXIMITY_BM25,
-			maxquerytime		: 0,
-			weights				: [],
-			overrides 			: [],
-			selectlist			: "*",
+    var query_parameters = {
+    		offset				: 0,
+    		limit				: 20,
+    		mode				: Sphinx.searchMode.ALL,
+    		weights				: [],
+    		sort				: Sphinx.sortMode.RELEVANCE,
+    		sortby				: "",
+    		min_id				: 0,
+    		max_id				: 0,
+    		filters				: [],
+    		groupby				: "",
+    		groupfunc			: Sphinx.groupFunc.DAY,
+    		groupsort			: "@group desc",
+    		groupdistinct		: "",
+    		maxmatches			: 1000,
+    		cutoff				: 0,
+    		retrycount			: 0,
+    		retrydelay			: 0,
+    		anchor				: [],
+    		indexweights		: [],
+    		ranker				: Sphinx.rankingMode.PROXIMITY_BM25,
+    		maxquerytime		: 0,
+    		weights				: [],
+    		overrides 			: [],
+    		selectlist			: "*",
             indexes				: '*',
             comment				: '',
         	query				: "",
-			error				: "", // per-reply fields (for single-query case)
-			warning				: "",
-			connerror			: false,
-	
-			reqs				: [],	// requests storage (for multi-query case)
-			mbenc				: "",
-			arrayresult			: true,
-			timeout				: 0
+    		error				: "", // per-reply fields (for single-query case)
+    		warning				: "",
+    		connerror			: false,
+
+    		reqs				: [],	// requests storage (for multi-query case)
+    		mbenc				: "",
+    		arrayresult			: true,
+    		timeout				: 0
         };
 
-        if (query_raw.query) {
-            for (x in query_parameters) {
-            	if (query_raw.hasOwnProperty(x)) {
-                    query[x] = query_raw[x];            		
-            	} else {
-                    query[x] = query_parameters[x];
-            	}
-            }
-        } else {
-            query = query_raw.toString();
-        }
+    
+    function ClientObj() {
+    	var self = this;
+    	
+    	this._responseProcessor = null;
+    	
+    	this._server_conn = {};
+    	this._path = null;
+    	this._port = null;
+    	this._host = null;
+    	
+		this.setServer = function(host, port) {
+			if (host) {
+				if (host.charAt(0) == '/') {
+					self._path = host;
+					return;
+				} else if (host.substr(0,7) == 'unix://') {
+					self._path = host.substr(7);
+					return;
+				}
+			}
+			
+			self._host = host || _defaults.host;
+			self._port = port || _defaults.port;
+			self._path = null;
+		}
 
-        /* if (connection_status != 1) {
-         sys.puts("You must connect to server before issuing queries");
-         return false;
 
-         }  */
-
-		var request = Buffer.makeWriter(); 
-		request.push.int16(Sphinx.command.SEARCH);
-		request.push.int16(Sphinx.clientCommand.SEARCH);
+		this.open = function(callback) {
+			if ((self._server_conn != undefined) && (self._server_conn.hasOwnProperty('writeable'))) {
+				return null;
+			}
+	
+			_connect(self, function() {
+				if (!self._server_conn.hasOwnProperty('writable')) return null;
 		
-        request.push.int32(0); // This will be request length
-        request.push.int32(0);
-        request.push.int32(1);
-        
-		request.push.int32(query.offset);
+				self._responseProcessor = new ResponseObj();
+
+				if (self._server_conn.readyState == 'open') {
+		        	self._server_conn.on('data', self._responseProcessor.append);
+					var cmd = Buffer.makeWriter();
+					cmd.push.int16(Sphinx.command[_defaults.connection_mode]);
+					cmd.push.int16(0);
+					cmd.push.int32(4);		// have to push a bogus query
+					cmd.push.int32(1);
+					self._server_conn.write(cmd.toBuffer());
 		
-		request.push.int32(query.limit);
-
-		request.push.int32(query.mode);
-		request.push.int32(query.ranker);
+			    } else {
+			        err = new Error('Connection is ' + self._server_conn.readyState + ' in open');
+			        self._server_conn = {};
+			        throw err;
+			    }
 		
-		request.push.int32(query.sort);
+				callback(null);
+			});
+			
+	        return true;
+		};
 		
-        request.push.lstring(query.sortby); 
-        request.push.lstring(query.query); // Query text
-        request.push.int32(query.weights.length); 
-        for (var weight in query.weights) {
-            request.push.int32(parseInt(weight));
-        }
+	    this.query = function(query_raw, callback) {
+	    	var query = {};
+	    	
+	        if (query_raw.query) {
+	            for (x in query_parameters) {
+	            	if (query_raw.hasOwnProperty(x)) {
+	                    query[x] = query_raw[x];            		
+	            	} else {
+	                    query[x] = query_parameters[x];
+	            	}
+	            }
+	        } else {
+	            query = query_raw.toString();
+	        }
+	        
+			var request = Buffer.makeWriter(); 
+			request.push.int16(Sphinx.command.SEARCH);
+			request.push.int16(Sphinx.clientCommand.SEARCH);
+			
+	        request.push.int32(0); // This will be request length
+	        request.push.int32(0);
+	        request.push.int32(1);
+	        
+			request.push.int32(query.offset);
+			
+			request.push.int32(query.limit);
 
-        request.push.lstring(query.indexes); // Indexes used
+			request.push.int32(query.mode);
+			request.push.int32(query.ranker);
+			
+			request.push.int32(query.sort);
+			
+	        request.push.lstring(query.sortby); 
+	        request.push.lstring(query.query); // Query text
+	        request.push.int32(query.weights.length); 
+	        for (var weight in query.weights) {
+	            request.push.int32(parseInt(weight));
+	        }
 
-        request.push.int32(1); // id64 range marker
+	        request.push.lstring(query_parameters.indexes); // Indexes used
 
-        //request.push.int32(0);
-        request.push.int64(0, query.min_id); // This is actually supposed to be two 64-bit numbers
-        //request.push.int32(0);				//  However, there is a caveat about using 64-bit ids
-        request.push.int64(0, query.max_id); 
+	        request.push.int32(1); // id64 range marker
 
-        request.push.int32(query.filters.length); 
-        for (var filter in query.filters) {
-            request.push.int32(filter.attr.length);
-            request.push_lstring(filter.attr);
-            request.push.int32(filter.type);
-            switch (filter.type) {
-            	case Sphinx.filterTypes.VALUES:
-            		request.push.int32(filter.values.length);
-            		for (var value in filter.values) {
-                		//request.push.int32(0);		// should be a 64-bit number
-                		request.push.int64(0, value);
-            		}
-            		break;
-            	case Sphinx.filterTypes.RANGE:
-            		//request.push.int32(0);		// should be a 64-bit number
-            		request.push.int64(0, filter.min);
-            		//request.push.int32(0);		// should be a 64-bit number
-            		request.push.int64(0, filter.max);
-            		break;
-            	case Sphinx.filterTypes.FLOATRANGE:
-            		request.push.float(filter.min);
-            		request.push.float(filter.max);
-            		break;
-            }
-        }
-        
-        request.push.int32(query.groupfunc);
-        request.push.lstring(query.groupby); // Groupby length
+	        //request.push.int32(0);
+	        request.push.int64(0, query.min_id); // This is actually supposed to be two 64-bit numbers
+	        //request.push.int32(0);				//  However, there is a caveat about using 64-bit ids
+	        request.push.int64(0, query.max_id); 
 
-        request.push.int32(query.maxmatches); // Maxmatches, default to 1000
+	        request.push.int32(query.filters.length); 
+	        for (var filter in query.filters) {
+	            request.push.int32(filter.attr.length);
+	            request.push_lstring(filter.attr);
+	            request.push.int32(filter.type);
+	            switch (filter.type) {
+	            	case Sphinx.filterTypes.VALUES:
+	            		request.push.int32(filter.values.length);
+	            		for (var value in filter.values) {
+	                		//request.push.int32(0);		// should be a 64-bit number
+	                		request.push.int64(0, value);
+	            		}
+	            		break;
+	            	case Sphinx.filterTypes.RANGE:
+	            		//request.push.int32(0);		// should be a 64-bit number
+	            		request.push.int64(0, filter.min);
+	            		//request.push.int32(0);		// should be a 64-bit number
+	            		request.push.int64(0, filter.max);
+	            		break;
+	            	case Sphinx.filterTypes.FLOATRANGE:
+	            		request.push.float(filter.min);
+	            		request.push.float(filter.max);
+	            		break;
+	            }
+	        }
+	        
+	        request.push.int32(query.groupfunc);
+	        request.push.lstring(query.groupby); // Groupby length
 
-        request.push.lstring(query.groupsort); // Groupsort
+	        request.push.int32(query.maxmatches); // Maxmatches, default to 1000
 
-        request.push.int32(query.cutoff); // Cutoff
-        request.push.int32(query.retrycount); // Retrycount
-        request.push.int32(query.retrydelay); // Retrydelay
+	        request.push.lstring(query.groupsort); // Groupsort
 
-        request.push.lstring(query.groupdistinct); // Group distinct
+	        request.push.int32(query.cutoff); // Cutoff
+	        request.push.int32(query.retrycount); // Retrycount
+	        request.push.int32(query.retrydelay); // Retrydelay
 
-        if (query.anchor.length == 0) {
-            request.push.int32(0); // no anchor given
-        } else {
-            request.push.int32(1); // anchor point in radians
-            request.push.lstring(query.anchor["attrlat"]); // Group distinct
-            request.push.lstring(query.anchor["attrlong"]); // Group distinct
-    		request.push.float(query.anchor["lat"]);
-    		request.push.float(query.anchor["long"]);
-        }
+	        request.push.lstring(query.groupdistinct); // Group distinct
 
-        request.push.int32(query.indexweights.length);
-        for (var i in query.indexweights) {
-            request.push.int32(i);
-            request.push.int32(query.indexweights[i]);
-        }
+	        if (query.anchor.length == 0) {
+	            request.push.int32(0); // no anchor given
+	        } else {
+	            request.push.int32(1); // anchor point in radians
+	            request.push.lstring(query.anchor["attrlat"]); // Group distinct
+	            request.push.lstring(query.anchor["attrlong"]); // Group distinct
+	    		request.push.float(query.anchor["lat"]);
+	    		request.push.float(query.anchor["long"]);
+	        }
 
-        request.push.int32(query.maxquerytime); 
+	        request.push.int32(query.indexweights.length);
+	        for (var i in query.indexweights) {
+	            request.push.int32(i);
+	            request.push.int32(query.indexweights[i]);
+	        }
 
-        request.push.int32(query.weights.length);
-        for (var i in query.weights) {
-            request.push.int32(i);
-            request.push.int32(query.weights[i]);
-        }
+	        request.push.int32(query.maxquerytime); 
 
-        request.push.lstring(query.comment); 
+	        request.push.int32(query.weights.length);
+	        for (var i in query.weights) {
+	            request.push.int32(i);
+	            request.push.int32(query.weights[i]);
+	        }
 
-        request.push.int32(query.overrides.length);
-        for (var i in query.overrides) {
-            request.push.lstring(query.overrides[i].attr); 
-            request.push.int32(query.overrides[i].type);
-            request.push.int32(query.overrides[i].values.length);
-            for (var id in query.overrides[i].values) {
-                request.push.int64(id);
-                switch (query.overrides[i].type) {
-	                case Sphinx.attribute.FLOAT:
-	                    request.push.float(query.overrides[i].values[id]);
-	                    break;
-	                case Sphinx.attribute.BIGINT:
-	                    request.push.int64(query.overrides[i].values[id]);
-	                    break;
-	                default:
-	                    request.push.int32(query.overrides[i].values[id]);
-	                    break;
-                }
-            }
-        }
+	        request.push.lstring(query.comment); 
 
-        request.push.lstring(query.selectlist); // Select-list
+	        request.push.int32(query.overrides.length);
+	        for (var i in query.overrides) {
+	            request.push.lstring(query.overrides[i].attr); 
+	            request.push.int32(query.overrides[i].type);
+	            request.push.int32(query.overrides[i].values.length);
+	            for (var id in query.overrides[i].values) {
+	                request.push.int64(id);
+	                switch (query.overrides[i].type) {
+		                case Sphinx.attribute.FLOAT:
+		                    request.push.float(query.overrides[i].values[id]);
+		                    break;
+		                case Sphinx.attribute.BIGINT:
+		                    request.push.int64(query.overrides[i].values[id]);
+		                    break;
+		                default:
+		                    request.push.int32(query.overrides[i].values[id]);
+		                    break;
+	                }
+	            }
+	        }
 
-        var request_buf = request.toBuffer();
-        var req_length = Buffer.makeWriter();
-        req_length.push.int32(request_buf.length - 8);
-        req_length.toBuffer().copy(request_buf, 4, 0);
+	        request.push.lstring(query.selectlist); // Select-list
 
-        console.log('Sending request of ' + request_buf.length + ' bytes');
-        server_conn.write(request_buf);
-    };
+	        var request_buf = request.toBuffer();
+	        var req_length = Buffer.makeWriter();
+	        req_length.push.int32(request_buf.length - 8);
+	        req_length.toBuffer().copy(request_buf, 4, 0);
 
-    self.disconnect = function() {
-        server_conn.end();
-    };
+	        //console.log('Sending request of ' + request_buf.length + ' bytes');
+	        
+	        self._responseProcessor.callback = callback;
+	        self._server_conn.write(request_buf);
+	    };
 
-    function readResponseData(data) {
-        // Got response!
-        // Command must match the one used in query
-        response_output.append(data);
+	    this.disconnect = function() {
+	    	self._server_conn.end();
+	    };
     }
 
-    function initResponseOutput(query_callback) {
-        response_output = {
-            status  : null,
-            version : null,
-            length  : 0,
-            data    : new Buffer(0),
-            parseHeader : function() {
-                if (this.status === null && this.data.length >= 8) {
-                    // console.log('Answer length: ' + (this.data.length));
-					var decoder = this.data.toReader();
-                    // var decoder = new bits.Decoder(this.data);
+    
+	// Connect to Sphinx server, for internal use only (open & query)
+    function _connect(client, callback) {
+		if ((client._server_conn != undefined) && (client._server_conn.hasOwnProperty('writeable'))) {
+			// check to see if we can still read and write to the socket
+			if (client._server_conn.readable && client._server_conn.writeable) {
+				callback();
+				return;
+			}
 
-                    this.status  = decoder.int16();
-                    this.version = decoder.int16();
-                    this.length  = decoder.int32();
-                    // console.log('Receiving answer with status ' + this.status + ', version ' + this.version + ' and length ' + this.length);
+			// zombie, kill it and open a new one
+			client._server_conn.destroy();
+			client._server_conn = {};
+		}
 
-					this.data = this.data.slice(8, this.data.length);
-                    // this.data = decoder.string(this.data.length - 8);
-                }
-            },
-            append  : function(data) {
-                //this.data.write(data.toString('utf-8'), 'utf-8');
-                // sys.puts('Appending ' + data.length + ' bytes');
-                var new_buffer = new Buffer(this.data.length + data.length);
-                this.data.copy(new_buffer, 0, 0);
-                data.copy(new_buffer, this.data.length, 0);
-                this.data = new_buffer;
-                // console.log('Data length after appending: ' + this.data.length);
-                this.parseHeader();
-                this.runCallbackIfDone();
-            },
-            done : function() {
-                // console.log('Length: ' + this.data.length + ' / ' + this.length);
-                return this.data.length >= this.length;
-            },
-            checkResponse : function(search_command) {
-                var errmsg = '';
-                if (this.length !== this.data.length) {
-                    errmsg += "Failed to read searchd response (status=" + this.status + ", ver=" + this.version + ", len=" + this.length + ", read=" + this.data.length + ")";
-                }
+		try {
+			if (client._path != null) {
+				client._server_conn = new tcp.createConnection(client._path);
+			} else {
+				client._server_conn = new tcp.createConnection(client._port, client._host);
+			}
+			
+            client._server_conn.on('connect', function() {
+            	client._server_conn.on('data', function(data) {
+	            	client._server_conn.removeAllListeners('data');
+	    			client._server_conn.setNoDelay(true);
+	    			client._server_conn.on('error', function(exp) {
+	    				console.log('Error: ' + exp);
+	    			});
+	    			client._server_conn.on('end', function() { });
 
-                if (this.version < search_command) {
-                    errmsg += "Searchd command older than client's version, some options might not work";
-                }
+					var decoder = data.toReader();
+	                status  = decoder.int16();
+	                version = decoder.int16();
+	                len  = decoder.int32();
 
-                if (this.status == Sphinx.statusCode.WARNING) {
-                    errmsg += "Server issued WARNING: " + this.data;
-                }
+	                console.log('Sphinx connection to server version ' + version);
+	                if (version < 1) {
+	                	err = new Error("Invalid Sphinx Server version");
+	                	throw(err);
+	                }
+					var version_number = Buffer.makeWriter();
+					version_number.push.int32(1);
+	                client._server_conn.write(version_number.toBuffer());
+	                callback();
+            	});
 
-                if (this.status == Sphinx.statusCode.ERROR) {
-                    errmsg += "Server issued ERROR: " + this.data;
+            });
+
+		}
+		catch (e) {
+			console.log('Error: ' + sys.inspect(e));
+		}
+    }
+
+
+    function ResponseObj() {
+    	var self = this;
+    	
+    	this.status = null;
+        this.version = null;
+        this.length = 0;
+        this.data = new Buffer(0);
+        this.callback = null;
+        
+        this.parseHeader = function() {
+            if (self.status === null && self.data.length >= 8) {
+                // console.log('Answer length: ' + (this.data.length));
+				var decoder = self.data.toReader();
+
+                self.status  = decoder.int16();
+                self.version = decoder.int16();
+                self.length  = decoder.int32();
+                //console.log('Receiving answer with status ' + this.status + ', version ' + this.version + ' and length ' + this.length);
+
+				self.data = self.data.slice(8, self.data.length);
+            } else if (self.data.length == 4) {
+				var decoder = self.data.toReader();
+
+                self.status  = decoder.int16();
+                self.version = decoder.int16();
+                console.log('Receiving error with status ' + this.status + ', version ' + this.version + ' and length ' + this.length);
+            }
+        };
+        
+
+        this.append = function(data) {
+            var new_buffer = new Buffer(self.data.length + data.length);
+            self.data.copy(new_buffer, 0, 0);
+            data.copy(new_buffer, self.data.length, 0);
+            self.data = new_buffer;
+            self.parseHeader();
+            self.deliverDataIfDone();
+        };
+        
+        this.done = function() {
+            return self.data.length >= self.length;
+        };
+        
+        this.checkResponse = function(search_command) {
+            var errmsg = '';
+            if (self.length !== self.data.length) {
+                errmsg += "Failed to read searchd response (status=" + self.status + ", ver=" + self.version + ", len=" + self.length + ", read=" + self.data.length + ")";
+            }
+
+            if (self.version < search_command) {
+                errmsg += "Searchd command older than client's version, some options might not work";
+            }
+
+            if (self.status == Sphinx.statusCode.WARNING) {
+                errmsg += "Server issued WARNING: " + self.data;
+            }
+
+            if (self.status == Sphinx.statusCode.ERROR) {
+                errmsg += "Server issued ERROR: " + self.data;
+            }
+            return errmsg;
+        };
+        
+        this.deliverDataIfDone = function() {
+            if (self.done()) {
+                var answer = "";
+                var errmsg = self.checkResponse(Sphinx.clientCommand.SEARCH);
+                if (!errmsg) {
+                    answer = parseSearchResponse(self.data);
+                    self.callback(null, answer);
+                } else {
+                    self.callback(new Error(errmsg), "{}");
                 }
-                return errmsg;
-            },
-            runCallbackIfDone : function() {
-                if (this.done()) {
-                    var answer;
-                    var errmsg = this.checkResponse(Sphinx.clientCommand.SEARCH);
-                    if (!errmsg) {
-                        answer = parseSearchResponse(response_output.data);
-                    }
-                    query_callback(errmsg, answer);
-                }
+                
+            	self.status = null;
+                self.version = null;
+                self.length = 0;
+                self.data = new Buffer(0);
+                self.callback = null;
             }
         };
     }
@@ -556,6 +602,10 @@ exports.SphinxClient = function() {
         
         return output;
     };
-
-    return self;
-};
+    
+    limestone.SphinxClient = function() {
+    	var nouvelle_client = new ClientObj();
+        nouvelle_client.setServer(null,null);
+        return nouvelle_client;
+    };
+    
