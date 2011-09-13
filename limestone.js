@@ -13,7 +13,7 @@ var limestone = exports;
     	connection_mode		: 'PERSIST'
     };
 
-    var Sphinx = {};
+    limestone.Sphinx = {};
 
     // All search modes
     Sphinx.searchMode = {
